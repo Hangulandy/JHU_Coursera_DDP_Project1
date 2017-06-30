@@ -1,5 +1,5 @@
 ---
-title: "JHU_Coursera_DDP_Project1"
+title: "Interactive Tornado Map of the United States"
 author: "hangulandy"
 date: "6/30/2017"
 output: 
@@ -17,24 +17,395 @@ output:
 ```{r setup, include = TRUE, warning = FALSE, message = FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, 
                       cache = TRUE)
+source("project1.R") 
 ```
 
-## R Markdown
+# Executive Summary
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+This project creates an interactive map showing tornado events in the United States.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+All code for non-standard functions used in this anaylsis can be found in **Appendix 1**.
 
-```{r cars}
-summary(cars)
+# Data
+
+The data for this assignment come in the form of a comma-separated-value file compressed via the bzip2 algorithm to reduce its size. You can download the file from the course web site:
+
+[Storm Data](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2) [47Mb]
+There is also some documentation of the database available. Here you will find how some of the variables are constructed/defined.
+
+[National Weather Service Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
+
+[National Climatic Data Center Storm Events FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)
+
+The events in the database start in the year 1950 and end in November 2011. In the earlier years of the database there are generally fewer events recorded, most likely due to a lack of good records. More recent years should be considered more complete.
+
+## Load and Tidy the Data
+
+```{r}
+load_packages()
+dat <- load_data()
+
+df <- add_year(dat)
+df$DATE <- mdy_hms(df$BGN_DATE)
+df <- tidy_data(df)
+df <- subset(df[df$LATITUDE > 2500 & df$LATITUDE < 5000 & df$EVCAT == "Tornado", ])
+df <- calc_damages(df)
+
+## Need to fix longitude to convert to proper pos / neg for leaflet
+df$LATITUDE <- df$LATITUDE / 100
+df$LONGITUDE <- (-1 * df$LONGITUDE) / 100
 ```
 
-## Including Plots
+## Create Popup Vector
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+content <- paste(sep = "",
+                 "Date:", df$DATE, "<br/>",
+                 "Fatalities: ", df$FATALITIES, "<br/>", 
+                 "Injuries: ", df$INJURIES, "<br/>",
+                 "Crop Dmg: ", dollar(df$Crop), "<br/>",
+                 "Prop Dmg: ", dollar(df$Property), "<br/>")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+# Map
+
+```{r}
+df %>%
+        leaflet %>% 
+        addTiles %>% 
+        addMarkers(lat = df$LATITUDE, lng = df$LONGITUDE, popup = content, 
+                   clusterOptions = markerClusterOptions())
+```
+
+# Appendix 1: Script for Functions
+
+```{r eval=FALSE}
+## These first two lines of code set the working directory to the location of 
+## the file being sourced
+this.dir <- dirname(parent.frame(2)$ofile)
+setwd(this.dir)
+
+## Load packages
+load_packages <- function() {
+        library(leaflet)
+        library(lubridate)
+        library(scales)
+}
+
+## Load data
+load_data <- function() {
+        mainDir <- getwd()
+        subDir <- "data"
+        
+        if (!file.exists(subDir)) {
+                dir.create(file.path(mainDir, subDir))
+        }
+        
+        setwd(file.path(mainDir, subDir))
+        
+        U <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+        dest <- "./StormData.csv.bz2"
+        
+        ## Only use when downloading.  If file exists, just skip this line
+        if (!file.exists(dest)) {
+                download.file(U, dest) 
+        }
+
+        temp <- read.csv(dest, header = TRUE, sep = ",")
+        
+        setwd(mainDir)
+        
+        temp <- temp[, c("BGN_DATE", "EVTYPE", "FATALITIES", "INJURIES", 
+                         "PROPDMG", "PROPDMGEXP", "CROPDMG", "CROPDMGEXP", 
+                         "LATITUDE", "LONGITUDE", "REMARKS")]
+        
+        return(temp)
+}
+
+## Takes a year variable from the date and adds it to the data table
+add_year <- function(dat) {
+        output <- data.frame()
+        temp <- mdy_hms(dat$BGN_DATE)
+        temp <- year(temp)
+        
+        dat$YEAR <- as.factor(temp)
+        
+        output <- dat
+        
+        return(output)
+}
+
+## Tidy the data with very specific transformations
+tidy_data <- function(dat) {
+        
+        dat <- subset(dat[dat$LATITUDE > 0 & dat$LONGITUDE > 0, ])
+        ## Coerce the remarks to character.  I did this because RStudio kept 
+        ## crashing when I was reading the remarks of class factor. I coerced 
+        ## to character and no longer had any issues.
+        dat$REMARKS <- as.character(dat$REMARKS) 
+        
+        ## Create a character variable to group events since I will replace the 
+        ## value with another character variable as seen in subsequent code.
+        dat$EVCAT <- as.character(dat$EVTYPE) 
+        
+        ## These search terms are out of order compared to the documentation to 
+        ## give priority. Lower in order here signifies more unique, so it is 
+        ## easier to use the order to recategorize
+        
+        ## Heat and drought group
+        ## Captures all heat events
+        hea <- c(".*heat.*", ".*warm.*", ".*hot.*", ".*record temp.*", 
+                 "HIGH TEMP.*", "RECORD HIGH.*") 
+        ## Re-categorizes drought events (some are also labeled with heat)
+        drt <- c(".*droug.*", ".*dry.*", ".*driest.*", "^EXCESSIVE$") 
+        
+        ## Rain, wind, thunderstorm, and flood group.  
+        ## Captures many events that follow, but they will all be recategorized
+        swd <- c(".*wind.*", "^WND$", "SEVERE TURBULENCE") 
+        ## Captures all lightning events, some will be recategorized later
+        ltn <- c(".*lightn.*", ".*lighting.*", "LIGNTNING") 
+        ## Captures some flood and thunderstorm events
+        rai <- c(".*heavy.*rain.*", ".*torrent.*", ".*wet.*", ".*rain.*", 
+                 ".*shower.*", ".*heavy.*precip.*") 
+        ## Recategorizes thunderstorm wind events
+        tst <- c(".*thunder.*wind.*", ".*TSTM.*", ".*thunderst.*", "wall cloud", 
+                 ".*microburst.*", "Metro Storm, May 26", "^HIGH$", "DOWNBURST", 
+                 ".*gustnado.*", "APACHE COUNTY") 
+        ## Captures all flood events
+        fld <- c(".*fl.*d.*", ".*stream", ".*river", ".*rising.*", "DAM BREAK", 
+                 "DAM FAILURE", ".*urban.*", "HIGH WATER") 
+        ## Recategorizes lake flood events
+        lsf <- c(".*lake.*flood.*") 
+        ## Recategorizes coastal flooding
+        cfl <- c(".oast.*fl.*d.*", ".*eros.*n.*") 
+        ## Recategorizes flash flooding
+        ffl <- c(".*flash.*", "DROWNING", "ICE JAM") 
+        
+        ## Surf, surge, tide, current, etc.
+        ## Recategorizes some coastal flooding because of surf
+        hsf <- c(".*surf.*", ".*swells.*", "ROUGH SEAS", "Marine Accident", 
+                 "HIGH WAVES", "HEAVY SEAS", "HIGH SEAS", "ROGUE WAVE") 
+        ## Recategorizes some surf events as rip current
+        rpc <- c(".*current*") 
+        ## Storm surge and tides, picks up astronomical low tide
+        srg <- c(".*surge*", ".*tide.*") 
+        ## Recategorizes astronomical low tide
+        alt <- c(".*stronomical low.*") 
+        
+        ## Cold, fog, freezing, sleet, and snow group
+        ## Picks up cold air funnels, some tornadoes, some snow, and many frost 
+        ## observations
+        cld <- c(".*cold.*", ".*low temp.*", ".*wind.*chill.*", ".*cool.*", 
+                 ".*hyp.*therm.*") 
+        ## Captures fog events that are not freezing fog
+        fog <- c("^fog$", ".*dense fog.*", "fog and cold.*") 
+        ## Captures freezing fog and ice fog events
+        ffg <- c("freezing fog", "ice fog") 
+        frz <- c("frost", ".*freez.*", ".*glaze.*", "^BLACK ICE$", "PATCHY ICE", 
+                 ".*ic.*road.*")
+        ## Captures some snow-related events
+        slt <- c(".*sleet.*", ".*pellet.*") 
+        ## Captures some blizzard and heavy snow events
+        ist <- c(".*ice.*storm.*") 
+        ## Captures some avalanche and blizzard events
+        snw <- c(".*heavy.*snow.*", ".*snow.*", "RECORD PRECIPITATION") 
+        ## Recategorizes some snow events, captures some blizzard events
+        wnt <- c(".*wint.*", ".*mix.*", "ICE FLOES", "^ICE$") 
+        ## Recategorizes some snow events, captures some blizzard events
+        avl <- c(".*valanc.*") 
+        ## Recategorizes some snow events and all blizzard events
+        blz <- c(".*lizzard.*") 
+        ## Recategorizes lake effect snow events
+        les <- c(".*lake.*snow.*") 
+        
+        ## Funnel cloud, hail, tornado group
+        ## Picks up some waterspouts, thunderstorms, tornadoes and hail
+        fnl <- c("funnel", ".*spout.*") 
+        ## Picks up some thunderstorms, tornadoes, and flooding, and icy roads
+        hai <- c(".*hail.*") 
+        ## Recategorizes marine hail
+        mha <- c("marine hail") 
+        ## Recategorizes marine wind events of all types
+        mwd <- c("marine.*wind.*", "COASTAL.*STORM", "MARINE MISHAP") 
+        ## Recategorizes tornado events
+        tdo <- c(".*torn.*") 
+        
+        ## Misc. values that are unique enough that they don't show up much
+        dbr <- c(".*debris.*", ".*slide.*", ".*landsl.*")
+        smk <- c(".*smoke.*")
+        dst <- c(".*dust.*")
+        ddv <- c(".*dust dev.*")
+        sch <- c(".*seiche*")
+        tsn <- c(".*tsunam.*")
+        vol <- c(".*volc.*", "VOG")
+        fir <- c(".*fire.*", "RED FLAG CRITERIA")
+        
+        ## Large storm group.  These are the highest that should overwrite 
+        ## previous, lesser events
+        tps <- c("tropical")
+        tpd <- c(".*depress.*")
+        hcn <- c(".*hurricane.*", ".*typhoon.*")
+        smr <- c(".*summary.*", ".*monthly.*", "NONE", "No Severe Weather", 
+                 "Other", "MILD PATTERN", ".*normal precip.*", 
+                 "EXCESSIVE PRECIPITATION", "RECORD LOW", "SOUTHEAST", 
+                 "NORTHERN LIGHTS")
+        
+        ## CANNOT c() the vectors or they will become one vector.  
+        ## Must keep them separate like this so that the remain a list to use 
+        ## in the loop
+        searchterms <- list(swd,
+                            ltn,
+                            rai,
+                            tst,
+                            fld,
+                            lsf,
+                            cfl,
+                            ffl,
+                            hsf,
+                            rpc,
+                            srg,
+                            alt,
+                            cld,
+                            fog,
+                            ffg,
+                            frz,
+                            slt,
+                            ist,
+                            snw,
+                            wnt,
+                            avl,
+                            blz,
+                            les,
+                            hea,
+                            drt,
+                            fnl,
+                            hai,
+                            mha,
+                            mwd,
+                            tdo,
+                            dbr,
+                            smk,
+                            ddv,
+                            dst,
+                            sch,
+                            tsn,
+                            vol,
+                            fir,
+                            tps,
+                            tpd,
+                            hcn,
+                            smr
+        )
+        
+        labels <- list("Strong Wind",
+                       "Lightning",
+                       "Heavy Rain",
+                       "T.Storm Wind",
+                       "Flooding",
+                       "Lakeshore Fl.",
+                       "Coastal Flood",
+                       "Flash Flood",
+                       "High Surf",
+                       "Rip Curr.",
+                       "St. Surge",
+                       "Astronomical Low Tide",
+                       "Cold / Wind Chill",
+                       "Dense Fog",
+                       "Freezing Fog",
+                       "Frost / Freeze",
+                       "Sleet",
+                       "Ice Storm",
+                       "Heavy Snow",
+                       "Winter Storm",
+                       "Avalanche",
+                       "Blizzard",
+                       "Lake-Effect Snow",
+                       "Heat",
+                       "Drought",
+                       "Funnel Cloud",
+                       "Hail",
+                       "Marine Hail",
+                       "Marine Wind",
+                       "Tornado",
+                       "Debris",
+                       "Dense Smoke",
+                       "Dust Devil",
+                       "Dust Storm",
+                       "Seiche",
+                       "Tsunami",
+                       "Volcanic Ash",
+                       "Wildfire",
+                       "Trop. Storm",
+                       "Trop. Dep.",
+                       "Hurricane",
+                       "Summaries"
+        )
+        
+        
+        for (i in 1:length(searchterms)) {
+                temp <- unique(grep(paste(searchterms[i][[1]], collapse = "|"), 
+                                    dat$EVTYPE, ignore.case = TRUE, 
+                                    value = TRUE))
+                dat$EVCAT <- replace(dat$EVCAT, dat$EVTYPE %in% temp, 
+                                     as.character(labels[[i]]))
+        }
+        
+        ## The ? entry didn't work in my grep searches, so I had to add an 
+        ## extra line of code for this one observation.
+        dat$EVCAT <- replace(dat$EVCAT, dat$EVTYPE == "?", 
+                             as.character("Summaries")) 
+        
+        ## Remove all other variables from memory
+        rm(list = ls()[!(ls() %in% c('dat'))])
+        
+        ## Reclass the EVCAT values to factor so they are usable later in other 
+        ## functions
+        dat$EVCAT <- as.factor(dat$EVCAT) 
+        return(dat)
+}
+
+
+## Starting of code to recalculate damages
+calc_damages <- function(dat) {
+        ## Coerce from factor to character for searching so the code is easier
+        dat$PROPDMGEXP <- as.character(dat$PROPDMGEXP) 
+        dat$CROPDMGEXP <- as.character(dat$CROPDMGEXP)
+        
+        ## Create variables to show damage with default value 1000
+        dat$PMult <- 1000 
+        dat$CMult <- 1000
+        
+        ## List of all possible values for PROPDMGEXP and CROPDMGEXP that 
+        ## should be multiplied by a number other than 1000
+        searchterms <- list("B", "M", "m") 
+        
+        ## Create vector of multipliers to pair with searchterms
+        multiplier <- c(1000000000, rep(1000000, 2)) 
+        
+        ## Replaces multiplier values with proper numbers
+        for (i in 1:length(searchterms)) {
+                dat$PMult <- replace(dat$PMult, dat$PROPDMGEXP == searchterms[i], multiplier[i])
+        }
+        
+        ## Calculates crop damage based on multipliers 
+        for (i in 1:length(searchterms)) {
+                dat$CMult <- replace(dat$CMult, dat$CROPDMGEXP == searchterms[i], multiplier[i])
+        }
+        
+        ## Calculate final property damage and crop damage values
+        dat$Property <- dat$PROPDMG * dat$PMult 
+        dat$Crop <- dat$CROPDMG * dat$CMult
+        
+        rm(list = ls()[!(ls() %in% c('dat'))])
+        
+        return(dat)
+}
+```
+
+
+# Appendix 2: Session Information
+
+```{r}
+sessionInfo()
+```
+
